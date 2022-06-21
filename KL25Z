@@ -1,0 +1,187 @@
+* main implementation: use this 'C' sample to create your own application
+ *
+ */
+
+
+
+
+
+#include "derivative.h" /* include peripheral declarations */
+unsigned char mensaje[]={"	\r\n"};
+unsigned char i=0;
+
+unsigned short t_rising;
+unsigned char rising_edge=0;
+unsigned short d_cm;
+unsigned short distancia_actual;
+unsigned short distancia_previa = 300;
+unsigned short med = 0;
+unsigned short cs = 0;
+unsigned short distancia_ma;
+unsigned short distancia_re;
+unsigned short distancia_rv;
+unsigned short distanciatotal_p;
+unsigned short distanciatotal_n;
+
+
+void delay_us (unsigned short t_us)
+{
+    PIT_LDVAL0=4*t_us;   	 //el factor de 4, es porque el reloj está 4 MHz (250 ns)
+    PIT_TCTRL0=1;   		 //hab timer
+    do{}while (PIT_TFLG0==0);  //mientras que no llegue a 0 el contador
+    PIT_TFLG0=1;   		 //apagar la bandera
+    PIT_TCTRL0=0;   		 //deshabilita conteo del PIT0
+}
+
+void LPTimer_IRQHandler()
+{
+    LPTMR0_CSR=(1<<7)+(1<<6)+1;
+    GPIOC_PDOR= (1<<6);   	 //PORTC_6 es trig del sensor ultrasonico
+    delay_us(12);
+    GPIOC_PDOR= 0;   		 
+}
+
+void UART0_IRQHandler()
+{
+    UART0_D=mensaje[i++];//Se transmite distancia recorrida en ASCII al celular
+    if (mensaje[i]==0)
+    {
+   	 i=0;
+   	 NVIC_ICER=(1<<12);
+    }
+}
+
+void FTM0_IRQHandler()
+{
+unsigned short t_us;
+    if ((TPM0_C0SC & (1<<7))!=0)
+    {
+   	 TPM0_C0SC=(1<<6)+(1<<7);    //Apagar bandera y mantener configuración
+   	 if (rising_edge==0)
+   	 {
+   		 t_rising=TPM0_C0V;
+   		 rising_edge=1;
+   		 TPM0_C0SC=(2<<2)+(1<<6);    //input capture/falling edge, hab intr
+   	 }
+   	 else
+   	 {
+   		 t_us=TPM0_C0V-t_rising;   	 //TPM0_C0V tiene el tiempo cuando detectó falling edge
+   		 d_cm=t_us/59;
+   		 
+   		 distancia_actual = d_cm; //Se almacena el dato dado por el sensor en cm que es la distancia actual de esa iteración
+   		 if (distancia_actual < distancia_previa) //sentido negativo (carrito regresa y se acerca al sensor)
+   		 {    
+   			 if (med == 0) //Primer dato del sentido negativo
+   			 {
+   				 distancia_ma = distancia_actual;//se define la distancia mayor = la que el usuario inició a remar o una nueva remada
+   				 med = 1;//se cambia el valor de la bandera de medición
+   			 }
+   			 else
+   			 {}
+   			 if (cs == 0) // No ha habido un cambio de sentido, por lo que no se ha completado una remada completa
+   			 {
+   				 distancia_re = distancia_ma - distancia_actual;//Distancia recorrida
+   			 }
+   			 else //Ya ha habido un cambio de sentido, por lo que ya se llevan varias remadas
+   			 {
+   				 distancia_rv = distanciatotal_p;//Distancia total recorrida en el sentido anterior
+   				 distancia_re = distancia_rv + (distancia_ma - distancia_actual);//Distancia recorrida
+   			 }
+   			 distancia_previa = distancia_actual;//Se define la distancia previa
+   			 distanciatotal_n = distancia_re;//Distancia total de dicho sentido
+   		 }    
+   						 
+   		 else if (distancia_actual > distancia_previa)//Sentido positivo (carrito avanza)
+   		 {    
+   			 if (med == 1) //Primer dato del sentido positivo
+   			 {
+   				 cs = cs + 1;//Cambio de sentido
+   				 med = 0;//Se cambia el valor de la bandera de medición
+   			 }
+   			 else
+   			 {}
+   							 
+   			 distancia_rv = distanciatotal_n;//Distancia total recorrida en el sentido anterior    
+   			 distancia_re = distancia_rv + distancia_actual;//Distancia recorrida
+   			 distancia_previa = distancia_actual;//Se define distancia previa
+   			 distanciatotal_p = distancia_re;//Distancia total de dicho sentido
+   		 }
+   		 else
+   		 {}
+   		 mensaje[3]=distancia_re%10+0x30;    //aislo las unidades y le sumo 0x30 por la tabla ASCII
+   		 distancia_re=distancia_re/10;
+   		 mensaje[2]=distancia_re%10+0x30;    //aislar las decenas
+   		 distancia_re=distancia_re/10;
+   		 mensaje[1]=distancia_re%10+0x30;    //aislar las centenas
+   		 distancia_re=distancia_re/10;
+   		 mensaje[0]=distancia_re%10+0x30;    
+   		 
+   		 NVIC_ISER=(1<<12);
+   	 
+   		 rising_edge=0;
+   		 TPM0_C0SC=(1<<2)+(1<<6);    //input capture/rising edge, hab intr
+   	 }
+    }
+    
+}
+
+
+
+void clk_init (void)
+{
+// FIRC = 4 MHz. BusClk = 4 MHz
+// UART0: FIRC. UART1: BusClk. UART2: BusClk. TPM: FIRC. IIC: BusClk
+
+MCG_C1|=(1<<6) + (1<<1);    //MCGOUTCLK : IRCLK. CG: Clock gate, MCGIRCLK enable pag 116
+MCG_C2|=1;   				 //Mux IRCLK : FIRC (4 MHz) pag 116
+MCG_SC=0;   				 //Preescaler FIRC 1:1 pag 116
+
+SIM_CLKDIV1=0;   			 //OUTDIV4=OUTDIV1= 1:1 pag 116. Busclk 4 MHz
+SIM_SOPT2|=15<<24;   		 //Seleccion MCGIRCLK tanto para UART0 como para TPM
+}
+
+int main(void)
+{
+    clk_init();
+    
+//TPM0_C0 PORTC_1 ALT4
+    SIM_SCGC5|=(1<<11);   	 //clk interfaz PORTC
+    PORTC_PCR1=(4<<8);   	 // TPM0_C0
+    
+    SIM_SCGC6|=(1<<24);   	 //clk interfaz TPM0
+    TPM0_SC=(1<<3)+2;   	 //clk interno (4 MHz), preescaler 4 (4MHz/4 = 1 MHz (1 us))
+    TPM0_C0SC=(1<<2)+(1<<6);    //input capture/rising edge, hab intr
+    
+    NVIC_ISER=(1<<17);   	 //Hab intr TPM0
+
+//LPTMR0    
+    SIM_SCGC5|=1;   		 //clk interfaz LPTMR0
+    LPTMR0_PSR=5;   		 //Se selecciona LPO y bypass (ms)
+    LPTMR0_CMR=250;   		 //Se configura la referencia a 250ms
+    LPTMR0_CSR=(1<<6)+1;    //Se habilita la intr de LPTMR0 y el contador CNR
+    
+    
+    
+//PIT
+    SIM_SCGC6|=(1<<23)+(1<<24);   	 //PIT
+    PIT_MCR=0;   			 //Hab PITs
+    PORTC_PCR6=(1<<8);   	 //GPIO
+    GPIOC_PDOR=0;   		 //Valor inicial = 0
+    GPIOC_PDDR=(1<<6);   	 //Output
+    
+//UART0
+    SIM_SCGC5|=(1<<9);   	 //reloj interfaz PORTA
+    PORTA_PCR1=(2<<8);   	 //funcion alternativa 2: UART0_RX
+    PORTA_PCR2=(2<<8);   	 //funcion alternativa 2: UART0_TX
+    
+    SIM_SCGC4|=(1<<10);   	 //reloj interfaz UART0
+    UART0_BDH=0;
+    UART0_BDL=26;   		 //ecuacion de SBR para generar baud rate (9600 bps)
+    UART0_C2 = (1<<2) + (1<<3) + (1<<5) +(1<<7);//Se habilita la rx, tx y sus interrupciones
+    NVIC_ISER=(1<<28); //Se habilita interrupcion de uart0 en NVIC
+
+    for(;;) {       
+    }
+    
+    return 0;
+}
